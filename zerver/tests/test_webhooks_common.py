@@ -21,6 +21,7 @@ from zerver.lib.webhooks.common import (
     MISSING_EVENT_HEADER_MESSAGE,
     MissingHTTPEventHeaderError,
     check_send_webhook_message,
+    check_topic_rename,
     get_fixture_http_headers,
     standardize_headers,
     validate_extract_webhook_http_header,
@@ -200,6 +201,37 @@ class WebhooksCommonTestCase(ZulipTestCase):
         assert message_id is not None
         msg = Message.objects.get(id=message_id)
         self.assertEqual(msg.topic_name(), "Test topic")
+
+    def test_check_topic_rename(self) -> None:
+        realm = get_realm("zulip")
+        user_profile = get_user("webhook-bot@zulip.com", realm)
+        stream_name = "webhook-rename-test"
+        old_topic = "Old Topic"
+        new_topic = "New Topic"
+
+        self.make_stream(stream_name)
+        self.subscribe(user_profile, stream_name)
+
+        with patch("zerver.lib.webhooks.common.do_update_message") as mock_update:
+            check_topic_rename(user_profile, "NonExistentStream", old_topic, new_topic)
+            mock_update.assert_not_called()
+
+        with patch("zerver.lib.webhooks.common.do_update_message") as mock_update:
+            check_topic_rename(user_profile, stream_name, "Ghost Topic", new_topic)
+            mock_update.assert_not_called()
+
+        self.send_stream_message(
+            user_profile, stream_name, topic_name=old_topic, content="Test message"
+        )
+
+        with patch("zerver.lib.webhooks.common.do_update_message") as mock_update:
+            check_topic_rename(user_profile, stream_name, old_topic, new_topic)
+
+            mock_update.assert_called_once()
+            kwargs = mock_update.call_args[1]
+            request = kwargs["message_edit_request"]
+            self.assertEqual(request.target_topic_name, new_topic)
+            self.assertEqual(request.propagate_mode, "change_all")
 
 
 class WebhookURLConfigurationTestCase(WebhookTestCase):
