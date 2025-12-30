@@ -3,7 +3,9 @@ from unittest.mock import patch
 import orjson
 
 from zerver.lib.test_classes import WebhookTestCase
-from zerver.lib.webhooks.git import COMMITS_LIMIT
+from zerver.lib.webhooks.git import COMMITS_LIMIT, TOPIC_WITH_PR_OR_ISSUE_INFO_TEMPLATE
+from zerver.models import Message
+from zerver.models.constants import MAX_TOPIC_NAME_LENGTH
 
 TOPIC_REPO = "public-repo"
 TOPIC_ISSUE = "public-repo / issue #2 Spelling error in the README file"
@@ -171,6 +173,117 @@ class GitHubWebhookTest(WebhookTestCase):
     def test_issue_comment_pull_request_comment_msg(self) -> None:
         expected_message = "sbansal1999 [commented](https://github.com/sbansal1999/public-repo/pull/1#issuecomment-1631445420) on [PR #1](https://github.com/sbansal1999/public-repo/pull/1):\n\n~~~ quote\nSome comment\n~~~"
         self.check_webhook("issue_comment__pull_request_comment", TOPIC_PR, expected_message)
+
+    def test_pull_request_edit_moves_topic_using_fixture(self) -> None:
+        payload_text = self.get_body("pull_request__edited")
+        payload = orjson.loads(payload_text)
+
+        repo_name = payload["repository"]["name"]
+        pr_number = payload["pull_request"]["number"]
+        old_title = payload["changes"]["title"]["from"]
+        new_title = payload["pull_request"]["title"]
+
+        old_topic = TOPIC_WITH_PR_OR_ISSUE_INFO_TEMPLATE.format(
+            repo=repo_name, type="PR", id=pr_number, title=old_title
+        )
+        new_topic = TOPIC_WITH_PR_OR_ISSUE_INFO_TEMPLATE.format(
+            repo=repo_name, type="PR", id=pr_number, title=new_title
+        )
+
+        self.subscribe(self.test_user, "commits")
+        self.send_stream_message(
+            self.test_user, "commits", topic_name=old_topic, content="Original PR content"
+        )
+
+        self.assertTrue(
+            Message.objects.filter(realm=self.test_user.realm, subject=old_topic).exists()
+        )
+
+        base_url = self.build_webhook_url()
+        url = f"{base_url}&stream=commits"
+
+        result = self.client_post(
+            url,
+            orjson.dumps(payload).decode(),
+            content_type="application/json",
+            HTTP_X_GITHUB_EVENT="pull_request",
+        )
+        self.assert_json_success(result)
+
+        self.assertFalse(
+            Message.objects.filter(realm=self.test_user.realm, subject=old_topic).exists(),
+            f"Old topic '{old_topic}' was not moved.",
+        )
+
+        self.assertTrue(
+            Message.objects.filter(realm=self.test_user.realm, subject=new_topic).exists(),
+            f"New topic '{new_topic}' was not found.",
+        )
+
+    def test_pull_request_edit_handles_truncated_topics(self) -> None:
+        """
+        Tests that the webhook correctly handles topics that were truncated
+        in the database because they exceeded MAX_TOPIC_NAME_LENGTH (60 chars).
+        """
+        # 1. Load the standard fixture
+        payload_text = self.get_body("pull_request__edited")
+        payload = orjson.loads(payload_text)
+
+        # 2. Modify it to use long titles
+        repo_name = payload["repository"]["name"]
+        pr_number = payload["pull_request"]["number"]
+
+        # Create titles that guarantee truncation (60+ chars)
+        long_old_title = "A" * 60
+        long_new_title = "B" * 60
+
+        payload["changes"]["title"]["from"] = long_old_title
+        payload["pull_request"]["title"] = long_new_title
+
+        # 3. Define expected (truncated) topics
+        full_old_topic = TOPIC_WITH_PR_OR_ISSUE_INFO_TEMPLATE.format(
+            repo=repo_name, type="PR", id=pr_number, title=long_old_title
+        )
+        truncated_old_topic = full_old_topic[:MAX_TOPIC_NAME_LENGTH]
+
+        full_new_topic = TOPIC_WITH_PR_OR_ISSUE_INFO_TEMPLATE.format(
+            repo=repo_name, type="PR", id=pr_number, title=long_new_title
+        )
+        truncated_new_topic = full_new_topic[:MAX_TOPIC_NAME_LENGTH]
+
+        # 4. Create the "Before" reality (Truncated in DB)
+        self.subscribe(self.test_user, "commits")
+        self.send_stream_message(
+            self.test_user,
+            "commits",
+            topic_name=truncated_old_topic,
+            content="History that should move",
+        )
+
+        # 5. Execute
+        url = f"{self.build_webhook_url()}&stream=commits"
+        result = self.client_post(
+            url,
+            orjson.dumps(payload).decode(),
+            content_type="application/json",
+            HTTP_X_GITHUB_EVENT="pull_request",
+        )
+        self.assert_json_success(result)
+
+        # 6. Verify Move
+        self.assertFalse(
+            Message.objects.filter(
+                realm=self.test_user.realm, subject=truncated_old_topic
+            ).exists(),
+            "Truncated old topic was not moved!",
+        )
+
+        self.assertTrue(
+            Message.objects.filter(
+                realm=self.test_user.realm, subject=truncated_new_topic
+            ).exists(),
+            "Truncated new topic not found!",
+        )
 
     def test_issue_msg(self) -> None:
         expected_message = "baxterthehacker opened [issue #2](https://github.com/baxterthehacker/public-repo/issues/2):\n\n~~~ quote\nIt looks like you accidentally spelled 'commit' with two 't's.\n~~~"

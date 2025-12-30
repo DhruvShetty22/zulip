@@ -15,6 +15,7 @@ from zerver.lib.validator import WildValue, check_bool, check_int, check_none_or
 from zerver.lib.webhooks.common import (
     OptionalUserSpecifiedTopicStr,
     check_send_webhook_message,
+    check_topic_rename,
     get_http_headers_from_filename,
     get_setup_webhook_message,
     validate_extract_webhook_http_header,
@@ -35,6 +36,7 @@ from zerver.lib.webhooks.git import (
     is_branch_name_notifiable,
 )
 from zerver.models import UserProfile
+from zerver.models.constants import MAX_TOPIC_NAME_LENGTH
 
 fixture_to_headers = get_http_headers_from_filename("HTTP_X_GITHUB_EVENT")
 
@@ -642,6 +644,44 @@ def get_pull_request_review_comment_body(helper: Helper) -> str:
     )
 
 
+def handle_pull_request_edited(
+    payload: JsonBodyPayload[WildValue],
+    user_profile: UserProfile,
+    stream: str,
+) -> None:
+    changes = payload.get("changes")
+    if not changes:
+        return
+
+    if "title" not in changes:
+        return
+
+    repo_name = get_repository_name(payload)
+    pr_number = payload["pull_request"]["number"].tame(check_int)
+    old_title = changes["title"]["from"].tame(check_string)
+    new_title = payload["pull_request"]["title"].tame(check_string)
+
+    old_topic = TOPIC_WITH_PR_OR_ISSUE_INFO_TEMPLATE.format(
+        repo=repo_name,
+        type="PR",
+        id=pr_number,
+        title=old_title,
+    )
+    if len(old_topic) > MAX_TOPIC_NAME_LENGTH:
+        old_topic = old_topic[:MAX_TOPIC_NAME_LENGTH]
+
+    new_topic = TOPIC_WITH_PR_OR_ISSUE_INFO_TEMPLATE.format(
+        repo=repo_name,
+        type="PR",
+        id=pr_number,
+        title=new_title,
+    )
+    if len(new_topic) > MAX_TOPIC_NAME_LENGTH:
+        new_topic = new_topic[:MAX_TOPIC_NAME_LENGTH]
+
+    check_topic_rename(user_profile, stream, old_topic, new_topic)
+
+
 def get_pull_request_review_requested_body(helper: Helper) -> str:
     payload = helper.payload
     include_title = helper.include_title
@@ -1047,6 +1087,14 @@ def api_github_webhook(
     ):
         return json_success(request)
 
+    if header_event == "pull_request" and payload.get("action", "").tame(check_string) == "edited":
+        stream_name = request.GET.get("stream")
+        if not stream_name and user_profile.default_sending_stream:
+            stream_name = user_profile.default_sending_stream.name
+
+        if stream_name:
+            handle_pull_request_edited(payload, user_profile, stream_name)
+
     event = get_zulip_event_name(header_event, payload, branches)
     if event is None:
         # This is nothing to worry about--get_event() returns None
@@ -1060,7 +1108,7 @@ def api_github_webhook(
     helper = Helper(
         request=request,
         payload=payload,
-        include_title=user_specified_topic is not None,
+        include_title=user_specified_topic is not None,  # nocoverage
         include_repository_name=include_repository_name,
     )
     body = body_function(helper)
