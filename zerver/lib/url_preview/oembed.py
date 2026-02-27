@@ -1,15 +1,109 @@
 import json
+import os
+import re
+from typing import Any, cast
+from urllib.parse import urlencode
 
+import orjson
 import requests
-from pyoembed import PyOembedException, oEmbed
+from django.conf import settings
 
 from zerver.lib.url_preview.types import UrlEmbedData, UrlOEmbedData
 
 
-def get_oembed_data(url: str, maxwidth: int = 640, maxheight: int = 480) -> UrlEmbedData | None:
+def load_oembed_providers() -> list[dict[str, Any]]:
+    # Load the List of the official providers from https://oembed.com/providers.json
+    providers_path = os.path.join(
+        settings.DEPLOY_ROOT, "node_modules", "oembed-providers", "providers.json"
+    )
+    with open(providers_path, "rb") as f:
+        return cast(list[dict[str, Any]], orjson.loads(f.read()))
+
+
+def scheme_to_regex(scheme: str) -> str:
+    variants = [scheme]
+    if "://*." in scheme:
+        variants.append(scheme.replace("://*.", "://", 1))
+
+    for variant in list(variants):
+        if variant.startswith("https://"):
+            variants.append("http://" + variant[len("https://") :])
+        elif variant.startswith("http://"):
+            variants.append("https://" + variant[len("http://") :])
+
+    variants = list(dict.fromkeys(variants))
+
+    patterns = []
+    for variant in variants:
+        pattern = re.escape(variant).replace(r"\*", ".*").replace(r"\&", "&")
+        if not variant.endswith("*"):
+            pattern += "$"
+        patterns.append(pattern)
+
+    return "(?:" + "|".join(patterns) + ")"
+
+
+def compile_oembed_providers(providers: list[dict[str, Any]]) -> dict[re.Pattern[str], str]:
+    endpoint_map: dict[re.Pattern[str], str] = {}
+
+    for provider in providers:
+        for endpoint in provider.get("endpoints", []):
+            schemes = endpoint.get("schemes", [])
+            endpoint_url = endpoint.get("url")
+
+            if not schemes or not endpoint_url:
+                continue
+
+            formatted_endpoint = endpoint_url.replace("{format}", "json")
+            joined_patterns = "|".join(scheme_to_regex(s) for s in schemes)
+            regex_str = f"(?:{joined_patterns})"
+
+            compiled_regex = re.compile(regex_str, re.IGNORECASE)
+            endpoint_map[compiled_regex] = formatted_endpoint
+
+    return endpoint_map
+
+
+OEMBED_PROVIDERS = load_oembed_providers()
+OEMBED_ENDPOINT_MAP = compile_oembed_providers(OEMBED_PROVIDERS)
+
+
+def get_oembed_endpoint(url: str) -> str | None:
+    for compiled_regex, endpoint_url in OEMBED_ENDPOINT_MAP.items():
+        if compiled_regex.match(url):
+            return endpoint_url
+    return None
+
+
+def get_oembed_data(
+    url: str,
+    maxwidth: int = 640,
+    maxheight: int = 480,
+    session: requests.Session | None = None,
+) -> UrlEmbedData | None:
+    endpoint = get_oembed_endpoint(url)
+    if endpoint is None:
+        return None
+
+    if session is None:
+        from zerver.lib.url_preview.preview import PreviewSession
+
+        session = PreviewSession()
+
+    params = {
+        "url": url,
+        "format": "json",
+        "maxwidth": maxwidth,
+        "maxheight": maxheight,
+    }
+
     try:
-        data = oEmbed(url, maxwidth=maxwidth, maxheight=maxheight)
-    except (PyOembedException, json.decoder.JSONDecodeError, requests.exceptions.ConnectionError):
+        request_url = endpoint + "?" + urlencode(params)
+        response = session.get(request_url)
+        if not response.ok:
+            return None
+        data = response.json()
+    except (requests.RequestException, json.JSONDecodeError):
         return None
 
     oembed_resource_type = data.get("type", "")
@@ -33,12 +127,7 @@ def get_oembed_data(url: str, maxwidth: int = 640, maxheight: int = 480) -> UrlE
             description=data.get("description"),
         )
 
-    # Otherwise, use the title/description from pyembed as the basis
-    # for our other parsers
-    return UrlEmbedData(
-        title=data.get("title"),
-        description=data.get("description"),
-    )
+    return None
 
 
 def strip_cdata(html: str) -> str:
