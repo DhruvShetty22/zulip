@@ -435,6 +435,25 @@ function get_props_for_popover_centering(
 
 // Toggles a popover menu directly; intended for use in keyboard
 // shortcuts and similar alternative ways to open a popover menu.
+function get_props_for_popover_at_mouse_position(x: number, y: number): Partial<tippy.Props> {
+    return {
+        getReferenceClientRect: () => new DOMRect(x, y, 0, 0),
+        // Top-left of the menu meets the cursor; if it overflows, flip
+        // through the remaining corners the way browser context menus do.
+        placement: "bottom-start",
+        popperOptions: {
+            modifiers: [
+                {
+                    name: "flip",
+                    options: {
+                        fallbackPlacements: ["top-start", "bottom-end", "top-end"],
+                    },
+                },
+            ],
+        },
+    };
+}
+
 export function toggle_popover_menu(
     target: tippy.ReferenceElement,
     popover_props: Partial<tippy.Props>,
@@ -443,6 +462,7 @@ export function toggle_popover_menu(
         show_as_overlay_always: boolean;
         // Only works for elements which are in message feed.
         message_feed_overlay_detection?: boolean;
+        mouse_position?: {x: number; y: number};
     },
 ): tippy.Instance {
     const instance = target._tippy;
@@ -458,6 +478,11 @@ export function toggle_popover_menu(
     }
 
     let mobile_popover_props = {};
+    let mouse_position_props = {};
+    if (options?.mouse_position !== undefined) {
+        const {x, y} = options.mouse_position;
+        mouse_position_props = get_props_for_popover_at_mouse_position(x, y);
+    }
 
     // If the window is mobile-sized, we will render the
     // popover centered on the screen as an overlay.
@@ -500,6 +525,7 @@ export function toggle_popover_menu(
         showOnCreate: true,
         ...popover_props,
         ...mobile_popover_props,
+        ...mouse_position_props,
     });
 }
 
