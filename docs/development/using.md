@@ -92,9 +92,109 @@ the development environment][authentication-dev-server].
 See the mobile project's documentation on [getting set up to develop
 and contribute to the mobile app][mobile-development-guide].
 
+## External access to the dev server
+
+By default, the dev server is reachable only from the machine it
+runs on: Vagrant forwards port 9991 to the host's loopback
+interface, and `run-dev` listens only on `localhost` otherwise.
+Several development workflows need reachability from elsewhere, for example:
+
+- **Testing integrations end-to-end.** Most Zulip integrations,
+  such as [incoming
+  webhooks](../webhooks/incoming-webhooks-overview.md) (for
+  services like GitHub, Jira), cloud
+  plugins like Zapier, and Python API clients running on another
+  machine, work by having an external service send requests into
+  your Zulip server.
+- **Running the mobile app against your dev server.** A physical
+  phone or an emulator needs a network-reachable address for the
+  dev server; see the [mobile setup
+  guide][mobile-development-guide] for the mobile-specific
+  pieces.
+
+:::{important}
+The Zulip development environment is not hardened for exposure to
+the public internet. Enable external access only for short testing
+windows, and turn it off when you are done.
+:::
+
+Follow the steps below to expose the dev server to an external
+system.
+
+1. **(Vagrant only) Let the Vagrant forwarder listen on all
+   interfaces.** Set `HOST_IP_ADDR 0.0.0.0` in
+   `~/.zulip-vagrant-config` and run `vagrant reload`. Vagrant
+   will then forward port 9991 from every host interface rather
+   than just loopback. See [Using a different port for
+   Vagrant][vagrant-host-ip] for background. `run-dev` inside the
+   guest already listens on all interfaces for the `vagrant` user,
+   so no further change is needed there. Direct installs on the
+   host OS skip this step and use `--interface=''` at startup
+   instead (see step 3).
+
+1. **Give the service a public URL that reaches your development
+   server.** Cloud services deliver webhooks only to publicly
+   reachable addresses, and most (e.g., GitHub, Stripe) require
+   `https://` URLs. Pick one:
+
+   - **Behind NAT (e.g., a laptop):** use a tunneling tool such as
+     [ngrok](https://ngrok.com/), [Cloudflare
+     Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/),
+     or [UltraHook](http://www.ultrahook.com/) (webhook-specific):
+
+     ```bash
+     ngrok http 9991
+     ```
+
+     The tool prints a public URL (e.g.,
+     `https://<subdomain>.ngrok-free.app`); use that host in the
+     next step.
+
+   - **Public-IP server:** the server's public address and port
+     9991 are already your URL. See [Developing
+     remotely](remote.md) for the full remote-server recipe.
+
+1. **Start `run-dev` with `EXTERNAL_HOST` and the flags your setup
+   requires.** `EXTERNAL_HOST` tells Zulip what base URL to
+   generate (strip any `https://` prefix; drop `:9991` if the
+   tunnel serves on the default HTTPS port). Add `--interface=''`
+   on a direct install so `run-dev` listens beyond `localhost`.
+   Add `--behind-https-proxy` only when an HTTPS tunnel is
+   fronting the server; it tells Zulip to generate `https://` URLs
+   and to trust cross-origin POSTs from the tunnel. For example, a
+   laptop running directly on the host OS behind an ngrok tunnel
+   would use:
+
+   ```bash
+   EXTERNAL_HOST="<subdomain>.ngrok-free.app" ./tools/run-dev --interface='' --behind-https-proxy
+   ```
+
+   Omit either flag that does not apply. A Vagrant guest reaching a
+   public-IP integration over plain HTTP uses just
+   `EXTERNAL_HOST=<public-host> ./tools/run-dev`.
+
+Before configuring the real third-party service, sanity-check
+reachability from outside your dev box, for example, with `curl`
+from another network:
+
+```bash
+curl -X POST -H "Content-Type: application/json" \
+  -d '{}' \
+  'https://<public-host>/api/v1/external/<integration>?api_key=<api_key>'
+```
+
+A `200` response (or a well-formed `400` from the integration's
+payload parser) confirms the chain is wired up; a connection
+timeout or TLS error points at the `HOST_IP_ADDR`, `--interface`,
+or tunnel configuration. Once that works, point the third-party
+service at the same URL and trigger an event; the request should
+appear in the `run-dev` console, and the resulting message in
+Zulip.
+
 [rest-api]: https://zulip.com/api/rest
 [authentication-dev-server]: authentication.md
 [django-runserver]: https://docs.djangoproject.com/en/5.0/ref/django-admin/#runserver
 [new-feature-tutorial]: ../tutorials/new-feature-tutorial.md
 [testing-docs]: ../testing/testing.md
 [mobile-development-guide]: https://github.com/zulip/zulip-flutter/blob/main/docs/setup.md
+[vagrant-host-ip]: setup-recommended.md#using-a-different-port-for-vagrant

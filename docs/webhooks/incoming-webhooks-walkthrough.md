@@ -292,6 +292,12 @@ test fixtures.
 Custom HTTP headers must be entered as a JSON dictionary, if you want to
 use any. Feel free to use 4-spaces as tabs for indentation if you'd like.
 
+### Live testing against a real service
+
+To have the third-party service deliver webhooks directly to your
+development environment, see [External access to the dev
+server](../development/using.md#external-access-to-the-dev-server).
+
 ## Step 5: Create automated tests
 
 Every incoming webhook integration should have a corresponding `tests.py`

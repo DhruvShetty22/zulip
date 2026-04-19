@@ -139,7 +139,11 @@ configured! 🎉"
   development environment. This enables you to do end-to-end testing with
   live data from the third-party service you're integrating, and can help
   you spot why something isn't working or if the service is using [custom
-  HTTP headers](incoming-webhooks-reference.md#custom-http-headers).
+  HTTP headers](incoming-webhooks-reference.md#custom-http-headers). See
+  [External access to the dev
+  server](../development/using.md#external-access-to-the-dev-server)
+  for alternatives (ngrok, Cloudflare Tunnel, public-IP VMs) and the
+  full reachability setup.
 
 ## URL specification
 
